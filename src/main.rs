@@ -9,6 +9,7 @@ use unqlite::{Transaction, UnQLite, KV};
 
 const SEEN_DB: &str = "seen.udb";
 const CONFIG_FILE: &str = "config.yaml";
+const REQ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const NUM_POSTS: usize = 50;
 
 #[derive(Deserialize, Debug)]
@@ -132,7 +133,7 @@ async fn pushshift(subreddit: &str) -> Result<Vec<Post>, Box<dyn std::error::Err
     )?;
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
+        .timeout(REQ_TIMEOUT)
         .build()?;
     let resp = client.get(pushshift_url).send().await?;
 
@@ -149,7 +150,7 @@ async fn reddit(subreddit: &str) -> Result<Vec<Post>, Box<dyn std::error::Error>
     )?;
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
+        .timeout(REQ_TIMEOUT)
         .user_agent("sub notifier (by u/test241894)")
         .build()?;
     let resp = client.get(pushshift_url).send().await?;
@@ -193,7 +194,7 @@ async fn pushover(config: &CONFIG, posts: Vec<Post>, db: &UnQLite) {
 
             // send POST
             let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(5))
+                .timeout(REQ_TIMEOUT)
                 .build()
                 .unwrap();
             let resp = client
