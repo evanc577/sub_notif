@@ -5,12 +5,17 @@ extern crate unqlite;
 use reqwest::Url;
 use serde::Deserialize;
 use std::fs;
-use unqlite::{UnQLite, KV};
+use unqlite::{Transaction, UnQLite, KV};
+
+const SEEN_DB: &str = "seen.udb";
+const CONFIG_FILE: &str = "config.yaml";
+const NUM_POSTS: usize = 50;
 
 #[derive(Deserialize, Debug)]
 struct CONFIG {
     pushover_token: String,
     pushover_user: String,
+    subreddit: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -57,34 +62,33 @@ struct Post {
     created_utc: StringOrF64,
 }
 
-const SEEN_DB: &str = "seen.udb";
-const CONFIG_FILE: &str = "config.yaml";
-const NUM_POSTS: usize = 50;
-
 fn main() {
     // parse config file
     let config = &parse_config();
-    println!("{:#?}", config);
 
     // open database of seen ids
     let unqlite = &UnQLite::create(&SEEN_DB);
 
+    let subreddit = &config.subreddit;
+
     loop {
         // get recent posts from reddit
-        let mut posts = match reddit() {
+        let mut posts = match reddit(subreddit) {
             Ok(ok) => ok,
             Err(err) => {
                 println!("{:#?}", err);
-                return;
+                std::thread::sleep(std::time::Duration::from_secs(10));
+                continue;
             }
         };
 
         // get recent posts from pushshift
-        let mut po_posts = match pushshift() {
+        let mut po_posts = match pushshift(subreddit) {
             Ok(ok) => ok,
             Err(err) => {
                 println!("{:#?}", err);
-                return;
+                std::thread::sleep(std::time::Duration::from_secs(10));
+                continue;
             }
         };
 
@@ -118,11 +122,11 @@ fn parse_config() -> CONFIG {
 }
 
 #[tokio::main]
-async fn pushshift() -> Result<Vec<Post>, Box<dyn std::error::Error>> {
+async fn pushshift(subreddit: &str) -> Result<Vec<Post>, Box<dyn std::error::Error>> {
     let pushshift_url = Url::parse_with_params(
         "https://api.pushshift.io/reddit/submission/search",
         &[
-            ("subreddit", "dreamcatcher"),
+            ("subreddit", &subreddit[..]),
             ("size", &NUM_POSTS.to_string()[..]),
         ],
     )?;
@@ -138,10 +142,9 @@ async fn pushshift() -> Result<Vec<Post>, Box<dyn std::error::Error>> {
 }
 
 #[tokio::main]
-#[allow(unused_variables, unreachable_code)]
-async fn reddit() -> Result<Vec<Post>, Box<dyn std::error::Error>> {
+async fn reddit(subreddit: &str) -> Result<Vec<Post>, Box<dyn std::error::Error>> {
     let pushshift_url = Url::parse_with_params(
-        "https://api.reddit.com/r/dreamcatcher/new.json",
+        &format!("https://api.reddit.com/r/{}/new.json", subreddit)[..],
         &[("limit", &NUM_POSTS.to_string()[..])],
     )?;
 
@@ -233,6 +236,7 @@ async fn pushover(config: &CONFIG, posts: Vec<Post>, db: &UnQLite) {
                                 if ok.status == 1 {
                                     // store post id in database
                                     db.kv_store(&post.id[..], "1").unwrap();
+                                    db.commit().unwrap();
                                     println!("Successfully pushed {}", post.id);
                                 }
                             }
