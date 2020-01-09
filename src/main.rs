@@ -78,8 +78,7 @@ fn main() {
             Ok(ok) => ok,
             Err(err) => {
                 println!("{:#?}", err);
-                std::thread::sleep(std::time::Duration::from_secs(10));
-                continue;
+                Vec::new()
             }
         };
 
@@ -88,8 +87,7 @@ fn main() {
             Ok(ok) => ok,
             Err(err) => {
                 println!("{:#?}", err);
-                std::thread::sleep(std::time::Duration::from_secs(10));
-                continue;
+                Vec::new()
             }
         };
 
@@ -97,7 +95,9 @@ fn main() {
         posts.append(&mut po_posts);
 
         // send notifications via pushover
-        pushover(config, posts, unqlite);
+        if !posts.is_empty() {
+            pushover(config, posts, unqlite);
+        }
 
         // sleep for a while
         std::thread::sleep(std::time::Duration::from_secs(10));
