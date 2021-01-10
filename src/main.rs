@@ -1,7 +1,10 @@
+#[macro_use]
+extern crate lazy_static;
 extern crate serde;
 extern crate serde_json;
 extern crate unqlite;
 
+use futures::join;
 use reqwest::Url;
 use serde::Deserialize;
 use std::fs;
@@ -11,6 +14,19 @@ const SEEN_DB: &str = "seen.udb";
 const CONFIG_FILE: &str = "config.yaml";
 const REQ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const NUM_POSTS: usize = 50;
+
+lazy_static! {
+    static ref DB: unqlite::UnQLite = UnQLite::create(&SEEN_DB);
+    static ref CLIENT: reqwest::Client = reqwest::Client::builder()
+        .timeout(REQ_TIMEOUT)
+        .build()
+        .unwrap();
+    static ref R_CLIENT: reqwest::Client = reqwest::Client::builder()
+        .timeout(REQ_TIMEOUT)
+        .user_agent("sub notifier (by u/test241894)")
+        .build()
+        .unwrap();
+}
 
 #[derive(Deserialize, Debug)]
 struct CONFIG {
@@ -63,40 +79,38 @@ struct Post {
     created_utc: StringOrF64,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     // parse config file
     let config = &parse_config();
-
-    // open database of seen ids
-    let unqlite = &UnQLite::create(&SEEN_DB);
 
     let subreddit = &config.subreddit;
 
     loop {
-        // get recent posts from reddit
-        let mut posts = match reddit(subreddit) {
-            Ok(ok) => ok,
-            Err(err) => {
-                println!("{:#?}", err);
-                Vec::new()
-            }
-        };
+        // get recent posts
+        let r_fut = reddit(subreddit);
+        let po_fut = pushshift(subreddit);
+        let (r_result, po_result) = join!(r_fut, po_fut);
+        let r_posts = r_result.unwrap_or_else(|err| {
+            eprintln!("{:#?}", err);
+            Vec::new()
+        });
+        let po_posts = po_result.unwrap_or_else(|err| {
+            eprintln!("{:#?}", err);
+            Vec::new()
+        });
 
-        // get recent posts from pushshift
-        let mut po_posts = match pushshift(subreddit) {
-            Ok(ok) => ok,
-            Err(err) => {
-                println!("{:#?}", err);
-                Vec::new()
-            }
-        };
-
-        // append pushover posts
-        posts.append(&mut po_posts);
+        // concatenate posts
+        let posts = r_posts
+            .into_iter()
+            .chain(po_posts.into_iter())
+            .collect::<Vec<_>>();
 
         // send notifications via pushover
         if !posts.is_empty() {
-            pushover(config, posts, unqlite);
+            pushover(config, posts)
+                .await
+                .unwrap_or_else(|err| eprintln!("{:#?}", err));
         }
 
         // sleep for a while
@@ -105,73 +119,54 @@ fn main() {
 }
 
 fn parse_config() -> CONFIG {
-    let contents = match fs::read_to_string(&CONFIG_FILE) {
-        Ok(ok) => ok,
-        Err(_) => {
-            println!("Error: failed to open file {}", &CONFIG_FILE);
-            panic!();
-        }
-    };
+    let contents = fs::read_to_string(&CONFIG_FILE).unwrap_or_else(|_| {
+        eprintln!("Error: failed to open file {}", &CONFIG_FILE);
+        panic!();
+    });
 
-    match serde_yaml::from_str(&contents) {
-        Ok(yaml) => yaml,
-        Err(err) => {
-            println!("Error parsing {}: {:?}", &CONFIG_FILE, err);
-            panic!();
-        }
-    }
+    serde_yaml::from_str(&contents).unwrap_or_else(|err| {
+        eprintln!("Error parsing {}: {:?}", &CONFIG_FILE, err);
+        panic!();
+    })
 }
 
-#[tokio::main]
 async fn pushshift(subreddit: &str) -> Result<Vec<Post>, Box<dyn std::error::Error>> {
     let pushshift_url = Url::parse_with_params(
         "https://api.pushshift.io/reddit/submission/search",
         &[
-            ("subreddit", &subreddit[..]),
-            ("size", &NUM_POSTS.to_string()[..]),
+            ("subreddit", subreddit),
+            ("size", NUM_POSTS.to_string().as_str()),
         ],
     )?;
 
-    let client = reqwest::Client::builder()
-        .timeout(REQ_TIMEOUT)
-        .build()?;
-    let resp = client.get(pushshift_url).send().await?;
+    let resp = CLIENT.get(pushshift_url).send().await?;
 
-    let json: PSResp = serde_json::from_str(&resp.text().await?[..])?;
+    let json: PSResp = serde_json::from_str(&resp.text().await?.as_str())?;
 
     Ok(json.data)
 }
 
-#[tokio::main]
 async fn reddit(subreddit: &str) -> Result<Vec<Post>, Box<dyn std::error::Error>> {
     let pushshift_url = Url::parse_with_params(
-        &format!("https://api.reddit.com/r/{}/new.json", subreddit)[..],
-        &[("limit", &NUM_POSTS.to_string()[..])],
+        format!("https://api.reddit.com/r/{}/new.json", subreddit).as_str(),
+        &[("limit", NUM_POSTS.to_string().as_str())],
     )?;
 
-    let client = reqwest::Client::builder()
-        .timeout(REQ_TIMEOUT)
-        .user_agent("sub notifier (by u/test241894)")
-        .build()?;
-    let resp = client.get(pushshift_url).send().await?;
-    let body = &resp.text().await?[..];
+    let resp = R_CLIENT.get(pushshift_url).send().await?;
+    let body = resp.text().await?;
 
-    let json: RedditResp = serde_json::from_str(body)?;
+    let json: RedditResp = serde_json::from_str(&body)?;
 
-    let mut temp = Vec::with_capacity(NUM_POSTS);
-    for post in json.data.children {
-        temp.push(post.data)
-    }
+    let temp = json.data.children.into_iter().map(|p| p.data).collect();
     Ok(temp)
 }
 
-#[tokio::main]
-async fn pushover(config: &CONFIG, posts: Vec<Post>, db: &UnQLite) {
+async fn pushover(config: &CONFIG, posts: Vec<Post>) -> Result<(), Box<dyn std::error::Error>> {
     const POST_TIMEOUT_RETRY: i32 = 3;
 
     for post in posts.iter().rev() {
         // check if post id has been seen
-        if db.kv_contains(&post.id[..]) {
+        if DB.kv_contains(&post.id[..]) {
             continue;
         }
 
@@ -193,11 +188,7 @@ async fn pushover(config: &CONFIG, posts: Vec<Post>, db: &UnQLite) {
             ];
 
             // send POST
-            let client = reqwest::Client::builder()
-                .timeout(REQ_TIMEOUT)
-                .build()
-                .unwrap();
-            let resp = client
+            let resp = CLIENT
                 .post("https://api.pushover.net/1/messages.json")
                 .form(&params)
                 .send()
@@ -209,7 +200,7 @@ async fn pushover(config: &CONFIG, posts: Vec<Post>, db: &UnQLite) {
                 Err(err) => {
                     if err.is_timeout() {
                         // retry if timed out
-                        println!(
+                        eprintln!(
                             "POST {} to pushover timed out (attempt {} of {})",
                             post.id,
                             attempt + 1,
@@ -218,7 +209,7 @@ async fn pushover(config: &CONFIG, posts: Vec<Post>, db: &UnQLite) {
                         continue;
                     } else {
                         // break if failed for other reason
-                        println!("{:?}", err);
+                        eprintln!("{:?}", err);
                         break;
                     }
                 }
@@ -227,17 +218,17 @@ async fn pushover(config: &CONFIG, posts: Vec<Post>, db: &UnQLite) {
             // add post id to database if success
             if resp_ok.status().is_success() {
                 match resp_ok.text().await {
-                    Err(err) => println!("{:#?}", err), // could not parse resp body
+                    Err(err) => eprintln!("{:#?}", err), // could not parse resp body
                     Ok(ok) => {
                         let parsed_resp: Result<POResp, serde_json::Error> =
                             serde_json::from_str(&ok[..]);
                         match parsed_resp {
-                            Err(err) => println!("{:#?}", err), // could not parse json
+                            Err(err) => eprintln!("{:#?}", err), // could not parse json
                             Ok(ok) => {
                                 if ok.status == 1 {
                                     // store post id in database
-                                    db.kv_store(&post.id[..], "1").unwrap();
-                                    db.commit().unwrap();
+                                    DB.kv_store(&post.id[..], "1")?;
+                                    DB.commit()?;
                                     println!("Successfully pushed {}", post.id);
                                 }
                             }
@@ -249,4 +240,6 @@ async fn pushover(config: &CONFIG, posts: Vec<Post>, db: &UnQLite) {
             break;
         }
     }
+
+    Ok(())
 }
