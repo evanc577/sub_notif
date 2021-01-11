@@ -4,10 +4,8 @@ extern crate serde;
 extern crate serde_json;
 extern crate unqlite;
 
-use futures::join;
 use reqwest::Url;
 use serde::Deserialize;
-use std::fs;
 use unqlite::{Transaction, UnQLite, KV};
 
 const SEEN_DB: &str = "seen.udb";
@@ -87,10 +85,12 @@ async fn main() {
     let subreddit = &config.subreddit;
 
     loop {
+        let start = tokio::time::Instant::now();
+
         // get recent posts
         let r_fut = reddit(subreddit);
         let po_fut = pushshift(subreddit);
-        let (r_result, po_result) = join!(r_fut, po_fut);
+        let (r_result, po_result) = tokio::join!(r_fut, po_fut);
         let r_posts = r_result.unwrap_or_else(|err| {
             eprintln!("{:#?}", err);
             Vec::new()
@@ -114,12 +114,12 @@ async fn main() {
         }
 
         // sleep for a while
-        std::thread::sleep(std::time::Duration::from_secs(10));
+        tokio::time::sleep_until(start + tokio::time::Duration::from_secs(10)).await;
     }
 }
 
 fn parse_config() -> CONFIG {
-    let contents = fs::read_to_string(&CONFIG_FILE).unwrap_or_else(|_| {
+    let contents = std::fs::read_to_string(&CONFIG_FILE).unwrap_or_else(|_| {
         eprintln!("Error: failed to open file {}", &CONFIG_FILE);
         panic!();
     });
