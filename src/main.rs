@@ -178,11 +178,12 @@ async fn pushover(config: &CONFIG, posts: Vec<Post>) -> Result<(), Box<dyn std::
                 StringOrF64::String(s) => s.clone(),
                 StringOrF64::F64(f) => format!("{}", f),
             };
+            let decoded_title = htmlescape::decode_html(&post.title).unwrap_or(post.title.clone());
             let params = [
                 ("token", &config.pushover_token),
                 ("user", &config.pushover_user),
                 ("title", &format!("New post on r/{}", "dreamcatcher")),
-                ("message", &post.title),
+                ("message", &decoded_title),
                 ("url", &format!("https://redd.it/{}", post.id)),
                 ("timestamp", &timestamp),
             ];
