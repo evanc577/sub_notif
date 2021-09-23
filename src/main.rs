@@ -12,12 +12,8 @@ const NUM_POSTS: usize = 50;
 lazy_static! {
     static ref DB: unqlite::UnQLite = UnQLite::create(&SEEN_DB);
     static ref CLIENT: reqwest::Client = reqwest::Client::builder()
+        .use_rustls_tls()
         .timeout(REQ_TIMEOUT)
-        .build()
-        .unwrap();
-    static ref R_CLIENT: reqwest::Client = reqwest::Client::builder()
-        .timeout(REQ_TIMEOUT)
-        .user_agent("sub notifier (by u/test241894)")
         .build()
         .unwrap();
 }
@@ -143,15 +139,14 @@ async fn pushshift(subreddit: &str) -> Result<Vec<Post>> {
 }
 
 async fn reddit(subreddit: &str) -> Result<Vec<Post>> {
-    let pushshift_url = Url::parse_with_params(
-        format!("https://api.reddit.com/r/{}/new.json", subreddit).as_str(),
-        &[("limit", NUM_POSTS.to_string().as_str())],
-    )?;
-
-    let resp = R_CLIENT.get(pushshift_url).send().await?;
-    let body = resp.text().await?;
-
-    let json: RedditResp = serde_json::from_str(&body)?;
+    let json = CLIENT
+        .get(&format!("https://api.reddit.com/r/{}/new.json", subreddit))
+        .query(&[("limit", NUM_POSTS.to_string())])
+        .header(reqwest::header::USER_AGENT, "sub notifier (by u/test2418945)")
+        .send()
+        .await?
+        .json::<RedditResp>()
+        .await?;
 
     let temp = json.data.children.into_iter().map(|p| p.data).collect();
     Ok(temp)
