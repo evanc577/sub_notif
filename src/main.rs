@@ -1,9 +1,5 @@
-#[macro_use]
-extern crate lazy_static;
-extern crate serde;
-extern crate serde_json;
-extern crate unqlite;
-
+use anyhow::Result;
+use lazy_static::lazy_static;
 use reqwest::Url;
 use serde::Deserialize;
 use unqlite::{Transaction, UnQLite, KV};
@@ -89,28 +85,28 @@ async fn main() {
 
         // get recent posts
         let r_fut = reddit(subreddit);
-        let po_fut = pushshift(subreddit);
-        let (r_result, po_result) = tokio::join!(r_fut, po_fut);
+        let ps_fut = pushshift(subreddit);
+        let (r_result, po_result) = tokio::join!(r_fut, ps_fut);
         let r_posts = r_result.unwrap_or_else(|err| {
-            eprintln!("{:#?}", err);
+            eprintln!("Reddit error: {}", err);
             Vec::new()
         });
-        let po_posts = po_result.unwrap_or_else(|err| {
-            eprintln!("{:#?}", err);
+        let ps_posts = po_result.unwrap_or_else(|err| {
+            eprintln!("Pushshift error: {}", err);
             Vec::new()
         });
 
         // concatenate posts
         let posts = r_posts
             .into_iter()
-            .chain(po_posts.into_iter())
+            .chain(ps_posts.into_iter())
             .collect::<Vec<_>>();
 
         // send notifications via pushover
         if !posts.is_empty() {
             pushover(config, posts)
                 .await
-                .unwrap_or_else(|err| eprintln!("{:#?}", err));
+                .unwrap_or_else(|err| eprintln!("Pushover error: {}", err));
         }
 
         // sleep for a while
@@ -130,7 +126,7 @@ fn parse_config() -> CONFIG {
     })
 }
 
-async fn pushshift(subreddit: &str) -> Result<Vec<Post>, Box<dyn std::error::Error>> {
+async fn pushshift(subreddit: &str) -> Result<Vec<Post>> {
     let pushshift_url = Url::parse_with_params(
         "https://api.pushshift.io/reddit/submission/search",
         &[
@@ -146,7 +142,7 @@ async fn pushshift(subreddit: &str) -> Result<Vec<Post>, Box<dyn std::error::Err
     Ok(json.data)
 }
 
-async fn reddit(subreddit: &str) -> Result<Vec<Post>, Box<dyn std::error::Error>> {
+async fn reddit(subreddit: &str) -> Result<Vec<Post>> {
     let pushshift_url = Url::parse_with_params(
         format!("https://api.reddit.com/r/{}/new.json", subreddit).as_str(),
         &[("limit", NUM_POSTS.to_string().as_str())],
@@ -161,7 +157,7 @@ async fn reddit(subreddit: &str) -> Result<Vec<Post>, Box<dyn std::error::Error>
     Ok(temp)
 }
 
-async fn pushover(config: &CONFIG, posts: Vec<Post>) -> Result<(), Box<dyn std::error::Error>> {
+async fn pushover(config: &CONFIG, posts: Vec<Post>) -> Result<()> {
     const POST_TIMEOUT_RETRY: i32 = 3;
 
     for post in posts.iter().rev() {
@@ -221,8 +217,7 @@ async fn pushover(config: &CONFIG, posts: Vec<Post>) -> Result<(), Box<dyn std::
                 match resp_ok.text().await {
                     Err(err) => eprintln!("{:#?}", err), // could not parse resp body
                     Ok(ok) => {
-                        let parsed_resp: Result<POResp, serde_json::Error> =
-                            serde_json::from_str(&ok[..]);
+                        let parsed_resp = serde_json::from_str::<POResp>(&ok[..]);
                         match parsed_resp {
                             Err(err) => eprintln!("{:#?}", err), // could not parse json
                             Ok(ok) => {
