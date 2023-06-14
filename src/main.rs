@@ -51,7 +51,12 @@ async fn main() {
         // send notifications via pushover
         if !posts.is_empty() {
             match pushover(config, &client, &posts).await {
-                Ok(_) => last_id = Some(posts[0].id.trim().to_owned()),
+                Ok(_) => {
+                    match parse_id(&posts[0].id) {
+                        Ok(id) => last_id = Some(id),
+                        Err(_) => eprintln!("Invalid post id {}", &posts[0].id),
+                    }
+                }
                 Err(e) => eprintln!("Pushover error: {}", e),
             }
         }
@@ -70,7 +75,7 @@ async fn parse_config() -> Config {
     })
 }
 
-async fn last_id() -> Result<Option<String>> {
+async fn last_id() -> Result<Option<u64>> {
     let mut f = match fs::File::open(LAST_ID_FILE).await {
         Ok(f) => f,
         Err(e) => {
@@ -83,14 +88,13 @@ async fn last_id() -> Result<Option<String>> {
 
     let mut last_id = String::new();
     f.read_to_string(&mut last_id).await?;
-    last_id = last_id.trim().to_owned();
-    Ok(Some(last_id))
+    Ok(Some(parse_id(&last_id)?))
 }
 
 async fn reddit_posts(
     client: &RedditClient,
     subreddit: &str,
-    last_id: &Option<String>,
+    last_id: &Option<u64>,
 ) -> Result<Vec<Post>> {
     let query = client
         .subreddit_posts_query()
@@ -102,13 +106,17 @@ async fn reddit_posts(
     while let Some(post) = stream.next().await {
         let post = post?;
         if let Some(last_id) = last_id {
-            if post.id.trim() == last_id {
+            if parse_id(&post.id)? <= *last_id {
                 break;
             }
         }
         posts.push(post);
     }
     Ok(posts)
+}
+
+fn parse_id(id: &str) -> Result<u64> {
+    Ok(u64::from_str_radix(id.trim().trim_start_matches("t3_"), 36)?)
 }
 
 async fn pushover(config: &Config, client: &reqwest::Client, posts: &[Post]) -> Result<()> {
