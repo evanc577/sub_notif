@@ -133,7 +133,7 @@ async fn pushover(config: &Config, client: &reqwest::Client, posts: &[Post]) -> 
                 ("user", &config.pushover_user),
                 ("title", &format!("New post on r/{}", "dreamcatcher")),
                 ("message", &decoded_title),
-                ("url", &format!("https://redd.it/{}", post.id)),
+                ("url", &format!("https://redd.it/{}", post.id.trim_start_matches("t3_"))),
                 ("timestamp", &timestamp.to_string()),
             ];
 
